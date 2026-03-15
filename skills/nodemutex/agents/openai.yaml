@@ -1,0 +1,4 @@
+interface:
+  display_name: "Nodemutex"
+  short_description: "Serialize exclusive local commands with nodemutex"
+  default_prompt: "Use this skill when you need to run commands through nodemutex, inspect the queue, or start a local nodemutex server safely across Linux, macOS, FreeBSD, Windows, containers, and CI."

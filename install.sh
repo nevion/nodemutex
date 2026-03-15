@@ -1,6 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
+if [[ "$(uname -s)" != "Linux" ]]; then
+  echo "install.sh only configures the systemd service on Linux."
+  echo "Build with cargo and run 'nodemutex server' manually on this platform."
+  exit 1
+fi
+
 echo "Building nodemutex (release)..."
 cargo build --release --manifest-path="$(dirname "$0")/Cargo.toml"
 

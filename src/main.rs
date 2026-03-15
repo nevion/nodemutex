@@ -1,23 +1,18 @@
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-fn socket_path() -> PathBuf {
-    if let Ok(p) = std::env::var("NODEMUTEX_SOCK") {
-        return PathBuf::from(p);
-    }
-    PathBuf::from("/run/nodemutex/nodemutex.sock")
-}
+mod transport;
+
+use transport::{Listener as ServerListener, Stream as ServerStream};
 
 // ── Server ──────────────────────────────────────────────────────────────────
 
 struct Client {
     id: u64,
     label: String,
-    stream: UnixStream,
+    stream: ServerStream,
 }
 
 struct ServerState {
@@ -50,15 +45,16 @@ impl ServerState {
         // Clients are kept in insertion order, so first waiter = first in vec
         // that isn't the holder.
         loop {
-            let waiter_pos = self
-                .clients
-                .iter()
-                .position(|c| Some(c.id) != self.holder);
+            let waiter_pos = self.clients.iter().position(|c| Some(c.id) != self.holder);
             let Some(pos) = waiter_pos else {
                 return;
             };
             let client = &mut self.clients[pos];
-            match client.stream.write_all(b"GRANT\n").and_then(|_| client.stream.flush()) {
+            match client
+                .stream
+                .write_all(b"GRANT\n")
+                .and_then(|_| client.stream.flush())
+            {
                 Ok(()) => {
                     let id = client.id;
                     eprintln!("nodemutex: granted to {}", client.label);
@@ -67,7 +63,10 @@ impl ServerState {
                 }
                 Err(_) => {
                     // Dead waiter, remove it.
-                    eprintln!("nodemutex: {} disconnected while queued", self.clients[pos].label);
+                    eprintln!(
+                        "nodemutex: {} disconnected while queued",
+                        self.clients[pos].label
+                    );
                     self.clients.remove(pos);
                 }
             }
@@ -117,23 +116,11 @@ impl ServerState {
 }
 
 fn run_server() -> io::Result<()> {
-    let path = socket_path();
-
-    // Clean up stale socket.
-    if path.exists() {
-        if UnixStream::connect(&path).is_ok() {
-            eprintln!("nodemutex: server already running at {}", path.display());
-            std::process::exit(1);
-        }
-        std::fs::remove_file(&path)?;
-    }
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let listener = UnixListener::bind(&path)?;
-    eprintln!("nodemutex: server listening on {}", path.display());
+    let listener: ServerListener = transport::bind()?;
+    eprintln!(
+        "nodemutex: server listening on {}",
+        transport::endpoint_display()
+    );
 
     let state = Arc::new(Mutex::new(ServerState::new()));
 
@@ -153,7 +140,7 @@ fn run_server() -> io::Result<()> {
     Ok(())
 }
 
-fn handle_client(stream: UnixStream, state: Arc<Mutex<ServerState>>) {
+fn handle_client(stream: ServerStream, state: Arc<Mutex<ServerState>>) {
     let read_stream = match stream.try_clone() {
         Ok(s) => s,
         Err(_) => return,
@@ -192,7 +179,11 @@ fn handle_client(stream: UnixStream, state: Arc<Mutex<ServerState>>) {
         };
 
         if s.holder.is_none() {
-            match client.stream.write_all(b"GRANT\n").and_then(|_| client.stream.flush()) {
+            match client
+                .stream
+                .write_all(b"GRANT\n")
+                .and_then(|_| client.stream.flush())
+            {
                 Ok(()) => {
                     eprintln!("nodemutex: granted to {label}");
                     s.holder = Some(id);
@@ -201,8 +192,7 @@ fn handle_client(stream: UnixStream, state: Arc<Mutex<ServerState>>) {
                 Err(_) => return,
             }
         } else {
-            let pos = s.clients.len()
-                - s.holder.map(|_| 1).unwrap_or(0);
+            let pos = s.clients.len() - s.holder.map(|_| 1).unwrap_or(0);
             eprintln!("nodemutex: {label} queued (position {pos})");
             s.clients.push(client);
         }
@@ -225,14 +215,11 @@ fn handle_client(stream: UnixStream, state: Arc<Mutex<ServerState>>) {
 // ── Client ──────────────────────────────────────────────────────────────────
 
 fn run_client(cmd: &[String]) -> io::Result<ExitCode> {
-    let path = socket_path();
-    let mut stream = UnixStream::connect(&path).map_err(|e| {
+    let endpoint = transport::endpoint_display();
+    let mut stream = transport::connect().map_err(|e| {
         io::Error::new(
             e.kind(),
-            format!(
-                "cannot connect to nodemutex server at {}: {e}",
-                path.display()
-            ),
+            format!("cannot connect to nodemutex server at {}: {e}", endpoint),
         )
     })?;
 
@@ -271,9 +258,12 @@ fn run_client(cmd: &[String]) -> io::Result<ExitCode> {
 // ── Status ──────────────────────────────────────────────────────────────────
 
 fn run_status() -> io::Result<()> {
-    let path = socket_path();
-    let mut stream = UnixStream::connect(&path).map_err(|e| {
-        io::Error::new(e.kind(), format!("cannot connect to server: {e}"))
+    let endpoint = transport::endpoint_display();
+    let mut stream = transport::connect().map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("cannot connect to server at {endpoint}: {e}"),
+        )
     })?;
 
     stream.write_all(b"__status__\n")?;

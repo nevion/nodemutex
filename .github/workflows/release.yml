@@ -1,0 +1,75 @@
+name: build-and-release
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package binary (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc -vV | sed -n 's/^host: //p')"
+          archive="nodemutex-${target}.tar.gz"
+          mkdir -p dist
+          tar -C target/release -czf "dist/${archive}" nodemutex
+          echo "ASSET=dist/${archive}" >> "$GITHUB_ENV"
+
+      - name: Package binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $target = (rustc -vV | Select-String '^host: ').Line.Split(' ')[1]
+          $archive = "nodemutex-$target.zip"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path target/release/nodemutex.exe -DestinationPath "dist/$archive" -Force
+          "ASSET=dist/$archive" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ runner.os }}-release
+          path: ${{ env.ASSET }}
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
